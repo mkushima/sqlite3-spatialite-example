@@ -1,3 +1,4 @@
+#include <chrono>
 #include <iostream>
 #include <vector>
 
@@ -333,6 +334,219 @@ int run_example_2(std::string db_name)
     return 0;
 }
 
+
+/**
+ * Example 3: Creating a table of points and performing spatial queries
+ * @param db_name Path to the SQLite database file
+ * @return 0 on success, 1 on failure
+ *
+ * This example shows how to create a table of points and perform spatial queries
+ * to find the closest point to given locations.
+ */
+int run_example_3(std::string db_name) {
+    sqlite3 *db_handle;
+    std::string table_name = "points";
+    std::string sql_cmd;
+    int ret;
+    char *err_msg = NULL;
+    void *cache;
+
+    // Open the database connection
+    std::cout << "Opening database: " << db_name << std::endl;
+
+    ret = sqlite3_open_v2(
+        db_name.c_str(),
+        &db_handle,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        NULL
+    );
+
+    if (ret != SQLITE_OK) {
+        std::cerr << "Error opening database: " << sqlite3_errmsg(db_handle) << std::endl;
+        sqlite3_close(db_handle);
+        return 1;
+    }
+
+    // Initialize Spatialite
+    cache = spatialite_alloc_connection();
+    spatialite_init_ex(db_handle, cache, 0);
+
+    // Check if spatial_ref_sys table exists
+    if (! spatial_metadata_exists(db_handle)) {
+        // Initialize the Spatialite library
+        std::cout << "Initializing Spatialite..." << std::endl;
+
+        sql_cmd = "SELECT InitSpatialMetaData(1);";
+        ret = sqlite3_exec(db_handle, sql_cmd.c_str(), NULL, NULL, &err_msg);
+
+        if (ret != SQLITE_OK) {
+            std::cerr << "Error initializing Spatialite: " << err_msg << std::endl;
+            handle_error(db_handle, cache, err_msg);
+            return 1;
+        }
+    }
+
+    // Creating a table of points
+    std::cout << "Creating table: " << table_name << std::endl;
+
+    sql_cmd = "CREATE TABLE IF NOT EXISTS " + table_name + " (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, name TEXT)";
+    ret = sqlite3_exec(db_handle, sql_cmd.c_str(), NULL, NULL, &err_msg);
+
+    if (ret != SQLITE_OK) {
+        std::cerr << "Error creating table: " << err_msg << std::endl;
+        handle_error(db_handle, cache, err_msg);
+        return 1;
+    }
+
+    // Add a geometry column to the table
+    std::cout << "Adding geometry column to table: " << table_name << std::endl;
+
+    sql_cmd = "SELECT AddGeometryColumn('" + table_name + "', 'geometry', 4326, 'POINT', 2);";
+    ret = sqlite3_exec(db_handle, sql_cmd.c_str(), NULL, NULL, &err_msg);
+
+    if (ret != SQLITE_OK) {
+        std::cerr << "Error adding geometry column: " << err_msg << std::endl;
+        handle_error(db_handle, cache, err_msg);
+        return 1;
+    }
+
+    // Insert points into the table
+    std::cout << "Inserting points into table: " << table_name << std::endl;
+
+    sql_cmd = "BEGIN TRANSACTION;";
+    ret = sqlite3_exec(db_handle, sql_cmd.c_str(), NULL, NULL, &err_msg);
+
+    if (ret != SQLITE_OK)
+    {
+        std::cerr << "Error starting transaction: " << err_msg << std::endl;
+        handle_error(db_handle, cache, err_msg);
+        return 1;
+    }
+
+    const std::vector<std::pair<std::string, std::string>> points = {
+        {"Rio de Janeiro", "POINT(-43.1729 -22.9068)"},
+        {"Foz do Iguacu", "POINT(-54.5854 -25.5165)"},
+        {"Maringa", "POINT(-51.9331 -23.4210)"},
+        {"Londrina", "POINT(-51.1662 -23.3197)"},
+        {"Curitiba", "POINT(-49.2652 -25.4269)"},
+        {"New York", "POINT(-74.0059 40.7128)"},
+    };
+
+    for (const auto& point : points) {
+        std::cout << "Inserting point: " << point.first << " - " << point.second << std::endl;
+
+        sql_cmd = "INSERT INTO " + table_name + " (name, geometry) VALUES \
+            ('" + point.first + "', GeomFromText('" + point.second + "', 4326))";
+        ret = sqlite3_exec(db_handle, sql_cmd.c_str(), NULL, NULL, &err_msg);
+
+        if (ret != SQLITE_OK) {
+            std::cerr << "Error inserting point: " << err_msg << std::endl;
+            handle_error(db_handle, cache, err_msg);
+            return 1;
+        }
+    }
+
+    sql_cmd = "COMMIT;";
+
+    // Commit the transaction
+    std::cout << "Committing transaction..." << std::endl;
+
+    sql_cmd = "COMMIT;";
+    ret = sqlite3_exec(db_handle, sql_cmd.c_str(), NULL, NULL, &err_msg);
+
+    if (ret != SQLITE_OK) {
+        std::cerr << "Error committing transaction: " << err_msg << std::endl;
+        handle_error(db_handle, cache, err_msg);
+        return 1;
+    }
+
+    // Find the closest point from the given locations
+    const std::vector<std::pair<std::string, std::string>> locations = {
+        {"Cambe", "POINT(-51.2810 -23.2780)"},
+        {"Paranavai", "POINT(-52.4624 -23.0819)"},
+        {"Sao Paulo", "POINT(-46.6396 -23.5558)"},
+    };
+
+    std::cout << "Finding closest point to each location... Precise, but slower" << std::endl;
+
+    auto start = std::chrono::high_resolution_clock::now();
+    for (const auto& location : locations) {
+        std::cout << "Location: " << location.first << " - " << location.second << std::endl;
+
+        sql_cmd = "SELECT name, ST_Distance(geometry, GeomFromText('" + location.second + "', 4326), 1) AS distance \
+            FROM " + table_name + " ORDER BY distance LIMIT 1;";
+
+        sqlite3_stmt *stmt;
+        ret = sqlite3_prepare_v2(db_handle, sql_cmd.c_str(), -1, &stmt, NULL);
+
+        if (ret != SQLITE_OK) {
+            std::cerr << "Error preparing statement: " << sqlite3_errmsg(db_handle) << std::endl;
+            handle_error(db_handle, cache, err_msg);
+            return 1;
+        }
+
+        ret = sqlite3_step(stmt);
+        if (ret == SQLITE_ROW) {
+            std::cout << "The closest city is: " << sqlite3_column_text(stmt, 0)
+                << " - " << sqlite3_column_text(stmt, 1) << std::endl;
+        } else {
+            std::cout << "No closest point found." << std::endl;
+        }
+
+        sqlite3_finalize(stmt);
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> diff = end - start;
+    std::cout << "Time to find closest point to each location (precise): " << diff.count() << " seconds" << std::endl;
+
+    std::cout << "Finding closest point to each location... Approximative, but faster" << std::endl;
+
+    start = std::chrono::high_resolution_clock::now();
+    for (const auto& location : locations) {
+        std::cout << "Location: " << location.first << " - " << location.second << std::endl;
+
+        sql_cmd = "SELECT name, ST_Distance(geometry, GeomFromText('" + location.second + "', 4326), 0) AS distance \
+            FROM " + table_name + " ORDER BY distance LIMIT 1;";
+
+        sqlite3_stmt *stmt;
+        ret = sqlite3_prepare_v2(db_handle, sql_cmd.c_str(), -1, &stmt, NULL);
+
+        if (ret != SQLITE_OK) {
+            std::cerr << "Error preparing statement: " << sqlite3_errmsg(db_handle) << std::endl;
+            handle_error(db_handle, cache, err_msg);
+            return 1;
+        }
+
+        ret = sqlite3_step(stmt);
+        if (ret == SQLITE_ROW) {
+            std::cout << "The closest city is: " << sqlite3_column_text(stmt, 0)
+                << " - " << sqlite3_column_text(stmt, 1) << std::endl;
+        } else {
+            std::cout << "No closest point found." << std::endl;
+        }
+
+        sqlite3_finalize(stmt);
+    }
+    end = std::chrono::high_resolution_clock::now();
+    diff = end - start;
+    std::cout << "Time to find closest point to each location (approximative): " << diff.count() << " seconds" << std::endl;
+
+    // Close the database connection
+    ret = sqlite3_close(db_handle);
+
+    if (ret != SQLITE_OK) {
+        std::cerr << "Error closing database connection: " << sqlite3_errmsg(db_handle) << std::endl;
+        // return 1;
+    }
+
+    // Shutdown the Spatialite library
+    spatialite_cleanup_ex(cache);
+    spatialite_shutdown();
+
+    std::cout << "Example 3 Done." << std::endl;
+    return 0;
+}
+
 /**
  * Prints the usage message for the application.
  *
@@ -426,6 +640,9 @@ int main (int argc, char *argv[])
         case 2:
             std::cout << "Running example 2..." << std::endl;
             return run_example_2(db_name);
+        case 3:
+            std::cout << "Running example 3..." << std::endl;
+            return run_example_3(db_name);
         default:
             std::cerr << "Unknown example ID: " << example_id << std::endl;
             return 1;
